@@ -2,7 +2,7 @@ import { NodeHttpClient } from "@effect/platform-node"
 import { Browser } from "@opencode/plugin-browser/rpc"
 import { OpenCode } from "@opencode/client/effect"
 import { SessionID } from "@opencode/schema/session-id"
-import electron, { type BrowserWindow } from "electron"
+import type { BrowserWindow } from "electron"
 import { Cause, Deferred, Effect, ManagedRuntime, Option, Queue, Schedule, Schema, Stream } from "effect"
 import { HttpClient, HttpClientRequest } from "effect/http"
 import type { BuiltinMainStorage } from "@opencode/plugin/gui/builtin"
@@ -10,7 +10,7 @@ import type { Embeds, Persisted, ServerEndpoints, Windows } from "@opencode/plug
 import { createBrowserPage, type BrowserPage, type Shared } from "./chromium"
 import { browserFailure } from "./errors"
 import { createBrowserNetwork, type BrowserNetwork } from "./network"
-import { destinationOrigin, fileURLWithin, refusal } from "./policy"
+import { destinationOrigin, refusal } from "./policy"
 import { createRefs } from "./refs"
 import type { PaneEvent } from "./ipc"
 import {
@@ -36,6 +36,7 @@ import {
   type PaneState,
 } from "./pane-machine"
 import { createBrowserRestoreStore } from "./restore"
+import { browserPartition, guardFiles } from "./shared-session"
 
 type Target = { readonly server: string; readonly session: string; readonly restore?: Browser.State }
 
@@ -96,15 +97,9 @@ export function createBrowserPane(input: {
       if (win.isDestroyed() || win.webContents.isDestroyed()) throw new Error("browser.pane.owner.unavailable")
       const sessionID = SessionID.make(target.session)
       const storageKey = `${target.server}\n${sessionID}`
-      const partition = `opencode-browser-${crypto.randomUUID()}`
+      const partition = browserPartition(server, `opencode-browser-${crypto.randomUUID()}`)
 
-      // Navigation guards cover documents; subresources (img, script, fetch) also must not read
-      // file: URLs outside the roots. One listener per partition covers every page in this attachment.
-      electron.session
-        .fromPartition(partition)
-        .webRequest.onBeforeRequest({ urls: ["file://*/*"] }, (details, callback) =>
-          callback({ cancel: !fileURLWithin(details.url, selectFileRoots(machine.state, binding)) }),
-        )
+      guardFiles({ partition, binding, handles, roots: (owner) => selectFileRoots(machine.state, owner) })
 
       const closed = () => dispatchBinding(binding, { type: "owner.closed" })
 

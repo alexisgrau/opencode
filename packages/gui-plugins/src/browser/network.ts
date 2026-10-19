@@ -5,6 +5,7 @@ import { Browser } from "@opencode/plugin-browser/rpc"
 import { BrowserProxy } from "@opencode/plugin-browser/proxy"
 import { Effect } from "effect"
 import { Base64 } from "effect/encoding"
+import { directNetwork, SHARED_PARTITION } from "./shared-session"
 
 export type BrowserNetwork = Effect.Success<ReturnType<typeof createBrowserNetwork>>
 
@@ -14,6 +15,9 @@ export const createBrowserNetwork = Effect.fn("BrowserNetwork.create")(function*
   location: { directory: string; workspace?: string }
   partition: string
 }) {
+  // OpenCode Custom: the shared partition connects directly (shared-session.ts).
+  if (input.partition === SHARED_PARTITION) return directNetwork(input.partition)
+
   const options = { location: input.location }
 
   const proxy = yield* Effect.acquireRelease(
