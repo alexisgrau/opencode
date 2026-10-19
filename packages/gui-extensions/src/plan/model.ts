@@ -123,7 +123,8 @@ export function createPlanModel(ctx: SetupContext<typeof definition>) {
 
     if (!opened.has(session.key)) {
       opened.add(session.key)
-      if (ctx.layout.state(key, session) === "closed") ctx.layout.open(key, session, { tab: "select", background: true })
+      if (ctx.layout.state(key, session) === "closed")
+        ctx.layout.open(key, session, { tab: "select", background: true })
     }
 
     return true

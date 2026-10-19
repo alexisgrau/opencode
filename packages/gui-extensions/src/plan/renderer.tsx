@@ -1,6 +1,15 @@
 import { createMemo, lazy, onCleanup, Suspense } from "solid-js"
 import { Icon } from "@opencode/ui/icon"
-import { Command, MenuItem, onIdle, Panel, Style, type MenuItem as MenuItemType, type PanelTab, type Setup } from "../sdk"
+import {
+  Command,
+  MenuItem,
+  onIdle,
+  Panel,
+  Style,
+  type MenuItem as MenuItemType,
+  type PanelTab,
+  type Setup,
+} from "../sdk"
 import type definition from "./index"
 import { count, createPlanModel } from "./model"
 import css from "./plan.css?inline"

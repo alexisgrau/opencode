@@ -18,8 +18,7 @@ function loadFolds(directory: string): Record<string, boolean> {
 
 const status = (t: Task) => (t.statut === DONE ? "done" : t.statut === ACTIVE ? "active" : "todo")
 const marker = (t: Task) => (t.statut === DONE ? "[x]" : t.statut === ACTIVE ? "[>]" : "[ ]")
-const hasDetail = (t: Task) =>
-  !!(t.description || t.preuve || t.agents?.length || t.historique.length > 1)
+const hasDetail = (t: Task) => !!(t.description || t.preuve || t.agents?.length || t.historique.length > 1)
 
 export default function PlanPanel(props: { plan: PlanModel; session: MountedSession }) {
   const ctx = useExtension<typeof definition>()
@@ -143,7 +142,9 @@ export default function PlanPanel(props: { plan: PlanModel; session: MountedSess
           <div data-slot="plan-bar">
             <div style={{ width: `${totals()[1] ? Math.round((100 * totals()[0]) / totals()[1]) : 0}%` }} />
           </div>
-          <Show when={date()}>{(value) => <span data-slot="plan-count">{ctx.t("updated", { date: value() })}</span>}</Show>
+          <Show when={date()}>
+            {(value) => <span data-slot="plan-count">{ctx.t("updated", { date: value() })}</span>}
+          </Show>
         </div>
         <ScrollView class="relative min-h-0 flex-1">
           <div ref={list} data-slot="plan-list">
