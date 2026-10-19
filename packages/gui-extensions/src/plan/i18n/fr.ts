@@ -1,0 +1,15 @@
+export default {
+  "tab.title": "Plan",
+  "menu.open": "Plan",
+  "command.title": "Ouvrir le plan",
+  "command.description": "Afficher le plan.json du projet dans un onglet latéral",
+  empty: "Pas encore de plan dans ce projet.",
+  invalid: "plan.json est illisible : {{error}}",
+  "no.steps": "(aucune étape)",
+  count: "{{done}}/{{total}} tâches faites",
+  updated: "mis à jour {{date}}",
+  "field.description": "Description",
+  "field.proof": "Preuve",
+  "field.agents": "Agents",
+  "field.history": "Historique",
+}
