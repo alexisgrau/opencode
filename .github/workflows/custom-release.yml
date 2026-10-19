@@ -2,19 +2,21 @@
 # and publishes it as a Release of this fork. The installed app takes its updates from the latest Release
 # (packages/desktop/electron-builder.config.ts).
 #
-# - Every hour: if the official update feed announces a version this fork has not built yet, build it.
+# - At 8:00, 12:00 and 19:00 Paris time: if the official update feed announces a version this fork has not built yet,
+#   build it. Cron runs in UTC without daylight saving, so it fires at both possible UTC hours and the plan keeps the
+#   run whose Paris hour matches.
 # - On a push to `custom` (or a manual run): build again, as a new release of the same official version.
 # - Versions: the CLI keeps the official version (2.0.33); the app is 2.0.33-custom.<n>, so that a rebuild counts as
 #   an update and the next official version counts as a newer one.
 # - The custom commits are replayed on the official tag in this run only; nothing is pushed. A conflict, or a failed
-#   check or build, publishes nothing and opens an issue (one per version: the hourly run skips a version that has
+#   check or build, publishes nothing and opens an issue (one per version: the scheduled runs skip a version that has
 #   an open issue until it is closed).
 
 name: custom-release
 
 on:
   schedule:
-    - cron: "23 * * * *"
+    - cron: "0 6,7,10,11,17,18 * * *"
   push:
     branches: [custom]
   workflow_dispatch:
@@ -65,8 +67,10 @@ jobs:
           failed=$(gh issue list -R "$GITHUB_REPOSITORY" --state open --search "custom-v$version in:title" \
             --json number -q 'length')
 
+          hour=$(TZ=Europe/Paris date +%H)
           build=false
           if [ "$EVENT" != schedule ]; then build=true
+          elif [[ " 08 12 19 " != *" $hour "* ]]; then echo "Paris $hour:00 is not a check time"
           elif [ "$last" = 0 ] && [ "$failed" = 0 ]; then build=true
           fi
 
@@ -185,6 +189,6 @@ jobs:
           - Branche \`custom\` posée sur : $BASE
           - Journal : $RUN
 
-          Pour un conflit : rejouer \`custom\` sur \`v$VERSION\` en local (\`git rebase --onto v$VERSION $BASE custom\`), régler les conflits, puis pousser \`custom\`, ce qui relance la compilation. Fermer cette issue rouvre les essais horaires pour cette version.
+          Pour un conflit : rejouer \`custom\` sur \`v$VERSION\` en local (\`git rebase --onto v$VERSION $BASE custom\`), régler les conflits, puis pousser \`custom\`, ce qui relance la compilation. Fermer cette issue rouvre les vérifications de 8 h, 12 h et 19 h pour cette version.
           EOF
           )"
