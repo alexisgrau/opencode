@@ -34,6 +34,11 @@ const tab = {
     description: "Exact tab ID returned by browser.tabs.open/list. Focus does not select a tool target.",
   }),
 }
+// OpenCode Custom: where a URL may come from.
+const visitedURL = {
+  description:
+    "An address from the user, a file, search results or a link on a visited page. Never invented or guessed.",
+}
 const frame = {
   frameID: optional(short).annotate({ description: "Frame ID from browser.frames. Omit for the main frame." }),
 }
@@ -163,7 +168,7 @@ export const Operations = [
     "tabs.open",
     "Open a browser tab, show it in the Review pane, and select it. Defaults to about:blank. Website traffic uses the connected server's network; localhost reaches that server.",
     {
-      url: optional(short),
+      url: optional(short).annotate(visitedURL),
       focus: optional(Schema.Boolean).annotate({
         description:
           "Default true: open the Review pane and select the new tab so the user sees it. Pass false only when the user asked for the tab to stay in the background.",
@@ -192,7 +197,7 @@ export const Operations = [
   operation(
     "navigate",
     "Navigate this tab to HTTP/HTTPS or about:blank; wait for the document load. Element refs expire.",
-    { ...tab, url: short },
+    { ...tab, url: short.annotate(visitedURL) },
     Tab,
   ),
   operation("back", "Go back in this tab and wait for loading to finish. Does not change the focused tab.", tab, Tab),
