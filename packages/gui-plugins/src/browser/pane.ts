@@ -39,6 +39,13 @@ import { createBrowserRestoreStore } from "./restore"
 
 type Target = { readonly server: string; readonly session: string; readonly restore?: Browser.State }
 
+/**
+ * OpenCode Custom: the browser's storage on disk, shared by every conversation of the desktop's own server, like the
+ * windows of one browser profile. Cookies, logins and site data survive conversation switches and restarts. A remote
+ * server keeps a private in-memory partition per attachment, as upstream.
+ */
+const SHARED_PARTITION = "persist:opencode-browser"
+
 /** The Electron and Effect handles of one binding; its phase lives in the pane machine. */
 type Handle = {
   window: number
@@ -80,6 +87,22 @@ export function createBrowserPane(input: {
   const disposals = new WeakMap<BrowserPage, Promise<void>>()
   // Keep long-lived RPC requests off Chromium's shared HTTP connection pool.
   const runtime = ManagedRuntime.make(NodeHttpClient.layerNodeHttp)
+  let sharedGuard = false
+
+  // The file: roots of the conversation whose page made a request; none for a request no page owns.
+  const rootsOf = (webContentsId: number | undefined) => {
+    if (webContentsId === undefined) return []
+
+    for (const [binding, handle] of handles)
+      for (const page of handle.pages.values()) {
+        try {
+          if (!page.contents.isDestroyed() && page.contents.id === webContentsId)
+            return selectFileRoots(machine.state, binding)
+        } catch {}
+      }
+
+    return []
+  }
 
   return {
     async register(window: number, binding: string, target: Target) {
@@ -96,15 +119,25 @@ export function createBrowserPane(input: {
       if (win.isDestroyed() || win.webContents.isDestroyed()) throw new Error("browser.pane.owner.unavailable")
       const sessionID = SessionID.make(target.session)
       const storageKey = `${target.server}\n${sessionID}`
-      const partition = `opencode-browser-${crypto.randomUUID()}`
+      const partition = server.sameMachine ? SHARED_PARTITION : `opencode-browser-${crypto.randomUUID()}`
 
       // Navigation guards cover documents; subresources (img, script, fetch) also must not read
-      // file: URLs outside the roots. One listener per partition covers every page in this attachment.
-      electron.session
-        .fromPartition(partition)
-        .webRequest.onBeforeRequest({ urls: ["file://*/*"] }, (details, callback) =>
-          callback({ cancel: !fileURLWithin(details.url, selectFileRoots(machine.state, binding)) }),
-        )
+      // file: URLs outside the roots. One listener per partition covers every page in this attachment. The shared
+      // partition has one listener for every conversation, which checks the roots of the page's own conversation.
+      if (partition !== SHARED_PARTITION)
+        electron.session
+          .fromPartition(partition)
+          .webRequest.onBeforeRequest({ urls: ["file://*/*"] }, (details, callback) =>
+            callback({ cancel: !fileURLWithin(details.url, selectFileRoots(machine.state, binding)) }),
+          )
+      else if (!sharedGuard) {
+        sharedGuard = true
+        electron.session
+          .fromPartition(SHARED_PARTITION)
+          .webRequest.onBeforeRequest({ urls: ["file://*/*"] }, (details, callback) =>
+            callback({ cancel: !fileURLWithin(details.url, rootsOf(details.webContentsId)) }),
+          )
+      }
 
       const closed = () => dispatchBinding(binding, { type: "owner.closed" })
 
@@ -167,7 +200,13 @@ export function createBrowserPane(input: {
 
             const attachment = { sessionID, connectionID: crypto.randomUUID() }
             const rpc = client.rpc(Browser.Definition)
-            handle.network = yield* createBrowserNetwork({ rpc, attachment, location: options.location, partition })
+            handle.network = yield* createBrowserNetwork({
+              rpc,
+              attachment,
+              location: options.location,
+              partition,
+              direct: partition === SHARED_PARTITION,
+            })
             const connected = yield* Deferred.make<void>()
             const outbound = yield* Queue.unbounded<Effect.Effect<void>>()
 
@@ -525,7 +564,11 @@ export function createBrowserPane(input: {
       detail: (value) => {
         if (current()) emit(binding, { type: "page", tabID: id, ...value })
       },
-      zoomed: () => handles.get(binding)?.pages.forEach((page) => page.detail()),
+      // The shared partition zooms an origin in every conversation's pages.
+      zoomed: () =>
+        (handle.partition === SHARED_PARTITION ? [...handles.values()] : [handle]).forEach((owner) =>
+          owner.pages.forEach((page) => page.detail()),
+        ),
       shortcut: (shortcut) => {
         if (!focused() || win.isDestroyed()) return
 
