@@ -115,10 +115,22 @@ jobs:
           echo "custom is based on $base; building on v$VERSION"
           echo "base=$base" >> "$GITHUB_OUTPUT"
           if [ "$base" != "v$VERSION" ]; then
+            # `custom` deletes the official workflows: a conflict on one of them (changed upstream, deleted here) is
+            # settled by keeping it deleted. Any other conflict stops the build.
             if ! git rebase --onto "v$VERSION" "$base"; then
-              git rebase --abort
-              echo "stage=conflit" >> "$GITHUB_OUTPUT"
-              exit 1
+              while true; do
+                conflicts=$(git diff --name-only --diff-filter=U)
+                others=$(printf '%s\n' "$conflicts" | grep -v -e '^\.github/workflows/' -e '^$' || true)
+                if [ -z "$conflicts" ] || [ -n "$others" ] \
+                  || printf '%s\n' "$conflicts" | grep -qx '.github/workflows/custom-release.yml'; then
+                  git rebase --abort
+                  echo "stage=conflit" >> "$GITHUB_OUTPUT"
+                  exit 1
+                fi
+                echo "Kept deleted: $conflicts"
+                printf '%s\n' "$conflicts" | xargs git rm -q
+                if GIT_EDITOR=true git rebase --continue; then break; fi
+              done
             fi
           fi
           git log --oneline "v$VERSION..HEAD"
