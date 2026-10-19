@@ -17,6 +17,13 @@ import { createBrowserRestoreStore } from "./restore"
 
 type Target = { readonly server: string; readonly session: string; readonly restore?: Browser.State }
 
+/**
+ * OpenCode Custom: the browser's storage on disk, shared by every conversation of the desktop's own server, like the
+ * windows of one browser profile. Cookies, logins and site data survive conversation switches and restarts. A remote
+ * server keeps a private in-memory partition per attachment, as upstream.
+ */
+const SHARED_PARTITION = "persist:opencode-browser"
+
 type Entry = {
   binding: string
   window: number
@@ -60,6 +67,21 @@ export function createBrowserPane(input: {
   // Keep long-lived RPC requests off Chromium's shared HTTP connection pool.
   const runtime = ManagedRuntime.make(NodeHttpClient.layerNodeHttp)
   let disposed = false
+  let sharedGuard = false
+
+  // The file: roots of the conversation whose page made a request; none for a request no page owns.
+  const rootsOf = (webContentsId: number | undefined) => {
+    if (webContentsId === undefined) return []
+
+    for (const entry of entries.values())
+      for (const page of entry.pages.values()) {
+        try {
+          if (!page.contents.isDestroyed() && page.contents.id === webContentsId) return entry.fileRoots
+        } catch {}
+      }
+
+    return []
+  }
 
   return {
     async register(window: number, binding: string, target: Target) {
@@ -106,18 +128,29 @@ export function createBrowserPane(input: {
           ]),
         ),
         focusedTabID: previous.focusedTabID,
-        partition: `opencode-browser-${crypto.randomUUID()}`,
+        partition: server.sameMachine ? SHARED_PARTITION : `opencode-browser-${crypto.randomUUID()}`,
         storageKey,
         fileRoots: [],
       }
 
       // Navigation guards cover documents; subresources (img, script, fetch) also must not read
-      // file: URLs outside the roots. One listener per partition covers every page in this attachment.
-      electron.session
-        .fromPartition(entry.partition)
-        .webRequest.onBeforeRequest({ urls: ["file://*/*"] }, (details, callback) =>
-          callback({ cancel: !fileURLWithin(details.url, entry.fileRoots) }),
-        )
+      // file: URLs outside the roots. One listener per partition covers every page in this attachment. The shared
+      // partition has one listener for every conversation, which checks the roots of the page's own conversation.
+      if (entry.partition !== SHARED_PARTITION)
+        electron.session
+          .fromPartition(entry.partition)
+          .webRequest.onBeforeRequest({ urls: ["file://*/*"] }, (details, callback) =>
+            callback({ cancel: !fileURLWithin(details.url, entry.fileRoots) }),
+          )
+      else if (!sharedGuard) {
+        sharedGuard = true
+        electron.session
+          .fromPartition(SHARED_PARTITION)
+          .webRequest.onBeforeRequest({ urls: ["file://*/*"] }, (details, callback) =>
+            callback({ cancel: !fileURLWithin(details.url, rootsOf(details.webContentsId)) }),
+          )
+      }
+
       // "unsupported" means the server has no browser plugin; the renderer stops retrying.
       let reason: "browser.pane.unsupported" | "browser.pane.replaced" | "browser.pane.suspended" | undefined
       let attached = false
@@ -168,6 +201,7 @@ export function createBrowserPane(input: {
               attachment,
               location: options.location,
               partition: entry.partition,
+              direct: entry.partition === SHARED_PARTITION,
             })
             const connected = yield* Deferred.make<void>()
             const outbound = yield* Queue.unbounded<Effect.Effect<void>>()
@@ -503,7 +537,11 @@ export function createBrowserPane(input: {
       detail: (value) => {
         if (entry.pages.has(id)) report(entry, { type: "page", tabID: id, ...value })
       },
-      zoomed: () => entry.pages.forEach((page) => page.detail()),
+      // The shared partition zooms an origin in every conversation's pages.
+      zoomed: () =>
+        (entry.partition === SHARED_PARTITION ? [...entries.values()] : [entry]).forEach((owner) =>
+          owner.pages.forEach((page) => page.detail()),
+        ),
       shortcut: (shortcut) => {
         if (!entry.pages.has(id) || entry.focusedTabID !== id || entry.win.isDestroyed()) return
 
