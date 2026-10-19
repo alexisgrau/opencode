@@ -1,6 +1,7 @@
-import { createEffect, createMemo, createSignal, For, on, Show } from "solid-js"
+import { createMemo, For, Show } from "solid-js"
+import { createStore } from "solid-js/store"
 import { ScrollView } from "@opencode/ui/scroll-view"
-import { useExtension, type MountedSession } from "../sdk"
+import { createKeyed, useExtension, type MountedSession } from "../sdk"
 import type definition from "./index"
 import { active, ACTIVE, count, DONE, updated, type PlanModel, type Task } from "./model"
 
@@ -24,10 +25,10 @@ export default function PlanPanel(props: { plan: PlanModel; session: MountedSess
   const ctx = useExtension<typeof definition>()
   const state = () => props.plan.state(props.session)
   const directory = () => props.session.directory
-  const [folds, setFolds] = createSignal<Record<string, boolean>>({})
+  // Changed folds per project directory; a project not changed in this window reads its stored folds.
+  const [changed, setChanged] = createStore<Record<string, Record<string, boolean>>>({})
+  const folds = createMemo(() => changed[directory()] ?? loadFolds(directory()))
   let list: HTMLDivElement | undefined
-
-  createEffect(on(directory, (dir) => setFolds(loadFolds(dir))))
 
   const unfolded = (t: Task) => {
     const stored = folds()[t.id]
@@ -37,7 +38,7 @@ export default function PlanPanel(props: { plan: PlanModel; session: MountedSess
 
   const toggle = (t: Task) => {
     const next = { ...folds(), [t.id]: !unfolded(t) }
-    setFolds(next)
+    setChanged(directory(), next)
     try {
       localStorage.setItem(storageKey(directory()), JSON.stringify(next))
     } catch {}
@@ -49,17 +50,12 @@ export default function PlanPanel(props: { plan: PlanModel; session: MountedSess
   const date = createMemo(() => updated(tasks()))
 
   // Bring the task in progress into view when it changes.
-  createEffect(
-    on(
-      () => current().join(","),
-      () => {
-        const id = current()[0]
-        if (!id || !list) return
-        queueMicrotask(() =>
-          list?.querySelector(`[data-task="${CSS.escape(id)}"]`)?.scrollIntoView({ block: "nearest" }),
-        )
-      },
-    ),
+  createKeyed(
+    () => current()[0],
+    (id) =>
+      queueMicrotask(() =>
+        list?.querySelector(`[data-task="${CSS.escape(id)}"]`)?.scrollIntoView({ block: "nearest" }),
+      ),
   )
 
   const Row = (rowProps: { task: Task }) => {

@@ -1,6 +1,6 @@
-import { createEffect, on, onCleanup } from "solid-js"
+import { onCleanup } from "solid-js"
 import { createStore, reconcile } from "solid-js/store"
-import type { MountedSession, SetupContext } from "../sdk"
+import { createKeyed, type MountedSession, type SetupContext } from "../sdk"
 import type definition from "./index"
 
 // plan.json as the opencode-strata `plan` tool writes it (plugins/plan/regles.ts). Only the plugin writes the file;
@@ -130,28 +130,25 @@ export function createPlanModel(ctx: SetupContext<typeof definition>) {
     return true
   }
 
-  createEffect(
-    on(
-      () => ctx.sessions.current(),
-      (session) => {
-        if (!session) return
+  // One read loop per routed session visit; it ends when another session is routed.
+  createKeyed(
+    () => ctx.sessions.current(),
+    (session) => {
+      let stopped = false
+      let timer: ReturnType<typeof setTimeout> | undefined
 
-        let stopped = false
-        let timer: ReturnType<typeof setTimeout> | undefined
+      const tick = async () => {
+        const present = await read(session)
 
-        const tick = async () => {
-          const present = await read(session)
+        if (!stopped) timer = setTimeout(tick, present ? PRESENT_MS : ABSENT_MS)
+      }
 
-          if (!stopped) timer = setTimeout(tick, present ? PRESENT_MS : ABSENT_MS)
-        }
-
-        void tick()
-        onCleanup(() => {
-          stopped = true
-          clearTimeout(timer)
-        })
-      },
-    ),
+      void tick()
+      onCleanup(() => {
+        stopped = true
+        clearTimeout(timer)
+      })
+    },
   )
 
   return {
