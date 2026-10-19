@@ -1450,8 +1450,9 @@ export function createBrowserPage(
         "Frame is unavailable. Call browser.frames({tabID}) and use a current frameID from this tab; omit frameID for the main frame.",
       )
     const sessionID = sessionFor(frameID, tree)
-    const depth = action.type === "snapshot" ? (action.depth ?? 8) : 8
-    const ax = await cdp.send("Accessibility.getFullAXTree", { frameId: frameID, depth }, sessionID)
+    // OpenCode Custom: the depth counts only printed nodes, so the whole tree is read; `find` searches all of it.
+    const depth = action.type === "snapshot" ? (action.depth ?? 8) : Infinity
+    const ax = await cdp.send("Accessibility.getFullAXTree", { frameId: frameID }, sessionID)
     const nodes = new Map(ax.nodes.map((node) => [node.nodeId, node]))
     const root = selected ? ax.nodes.find((node) => node.backendDOMNodeId === selected.backendID) : ax.nodes[0]
 
@@ -1464,7 +1465,7 @@ export function createBrowserPage(
     const lines: string[] = []
     let truncated = false
 
-    const walk = async (node: Protocol.Accessibility.AXNode, level: number): Promise<void> => {
+    const walk = async (node: Protocol.Accessibility.AXNode, level: number, parentName = ""): Promise<void> => {
       if (level > depth || lines.length >= 500) {
         truncated = true
 
@@ -1476,6 +1477,12 @@ export function createBrowserPage(
         .slice(0, 40)
 
       const properties = new Map(node.properties?.map((property) => [property.name, property.value.value]) ?? [])
+      const name = String(node.name?.value ?? "")
+        .replace(/\s+/g, " ")
+        .slice(0, 300)
+      // OpenCode Custom: layout wrappers print nothing and keep their children at their own level, so deep pages
+      // (React sites nest content 20 or more nodes down) fit the depth.
+      let printed = false
 
       if (!node.ignored) {
         const actionable =
@@ -1493,18 +1500,25 @@ export function createBrowserPage(
           properties.has(name) ? [`${name}=${properties.get(name)}`] : [],
         )
 
+        // An unnamed layout node, an InlineTextBox, or a text that repeats its parent's name.
+        const wrapper =
+          !ref &&
+          !flags.length &&
+          (role === "InlineTextBox" ||
+            (role === "StaticText" && name === parentName) ||
+            (!name && /^(generic|none|presentation)$/.test(role)))
+
         const box =
-          action.type === "snapshot" && action.boxes && ref && element
+          !wrapper && action.type === "snapshot" && action.boxes && ref && element
             ? await rect(element).catch(() => undefined)
             : undefined
 
-        lines.push(
-          `${"  ".repeat(level)}${ref ? `@${ref} ` : ""}[${role}] ${JSON.stringify(
-            String(node.name?.value ?? "")
-              .replace(/\s+/g, " ")
-              .slice(0, 300),
-          )} ${flags.join(" ")}${box ? ` box=${JSON.stringify(box)}` : ""}`,
-        )
+        const line = `${"  ".repeat(level)}${ref ? `@${ref} ` : ""}[${role}] ${JSON.stringify(name)} ${flags.join(" ")}${box ? ` box=${JSON.stringify(box)}` : ""}`
+
+        printed = !wrapper
+        // `find` keeps only matching lines, so the line limit counts matches.
+        if (printed && (action.type !== "find" || line.toLowerCase().includes(action.text.toLowerCase())))
+          lines.push(line)
       }
 
       if (["textbox", "searchbox"].includes(role) || properties.get("editable")) return
@@ -1512,15 +1526,13 @@ export function createBrowserPage(
       for (const childID of node.childIds ?? []) {
         const child = nodes.get(childID)
 
-        if (child) await walk(child, level + 1)
+        if (child) await walk(child, printed ? level + 1 : level, printed ? name : parentName)
       }
     }
 
     await walk(root, 0)
 
-    const content = (
-      action.type === "find" ? lines.filter((line) => line.toLowerCase().includes(action.text.toLowerCase())) : lines
-    ).join("\n")
+    const content = lines.join("\n")
 
     return { content: content.slice(0, Browser.MAX_TEXT), truncated: truncated || content.length > Browser.MAX_TEXT }
   }
