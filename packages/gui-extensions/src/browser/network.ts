@@ -13,41 +13,53 @@ export const createBrowserNetwork = Effect.fn("BrowserNetwork.create")(function*
   attachment: { sessionID: Session.ID; connectionID: string }
   location: { directory: string; workspace?: string }
   partition: string
+  /**
+   * OpenCode Custom: the desktop's own server runs on this machine, so pages connect directly instead of through the
+   * server's tunnel. The partition is then the browser's shared one: this attachment leaves its proxy and connections
+   * alone, as other conversations use them too.
+   */
+  direct?: boolean
 }) {
   const options = { location: input.location }
 
-  const proxy = yield* Effect.acquireRelease(
-    Effect.tryPromise(() =>
-      BrowserProxy.make({
-        open: (target, signal) =>
-          Effect.runPromise(input.rpc["tunnel.open"]({ ...input.attachment, target }, options), { signal }),
-        read: (tunnelID, signal) =>
-          Effect.runPromise(input.rpc["tunnel.read"]({ ...input.attachment, tunnelID }, options), { signal }),
-        write: (tunnelID, data, end, signal) =>
-          Effect.runPromise(
-            input.rpc["tunnel.write"]({ ...input.attachment, tunnelID, data: Base64.encode(data), end }, options),
-            { signal },
-          ),
-        close: (tunnelID) =>
-          Effect.runPromise(
-            input.rpc["tunnel.close"]({ ...input.attachment, tunnelID }, options).pipe(Effect.timeout("5 seconds")),
-          ),
-      }),
-    ),
-    (proxy) => Effect.promise(() => proxy.close()),
-  )
+  const proxy = input.direct
+    ? undefined
+    : yield* Effect.acquireRelease(
+        Effect.tryPromise(() =>
+          BrowserProxy.make({
+            open: (target, signal) =>
+              Effect.runPromise(input.rpc["tunnel.open"]({ ...input.attachment, target }, options), { signal }),
+            read: (tunnelID, signal) =>
+              Effect.runPromise(input.rpc["tunnel.read"]({ ...input.attachment, tunnelID }, options), { signal }),
+            write: (tunnelID, data, end, signal) =>
+              Effect.runPromise(
+                input.rpc["tunnel.write"]({ ...input.attachment, tunnelID, data: Base64.encode(data), end }, options),
+                { signal },
+              ),
+            close: (tunnelID) =>
+              Effect.runPromise(
+                input.rpc["tunnel.close"]({ ...input.attachment, tunnelID }, options).pipe(Effect.timeout("5 seconds")),
+              ),
+          }),
+        ),
+        (proxy) => Effect.promise(() => proxy.close()),
+      )
 
   const partition = session.fromPartition(input.partition)
-  yield* Effect.addFinalizer(() => Effect.promise(() => partition.closeAllConnections()))
-  // This is the browser's private partition, not the app/API connection. Never
-  // bypass localhost: it must resolve on the machine running the OC2 server.
-  yield* Effect.tryPromise(() =>
-    partition.setProxy({ mode: "fixed_servers", proxyRules: proxy.url, proxyBypassRules: "<-loopback>" }),
-  )
-  yield* Effect.tryPromise(() => partition.closeAllConnections())
+  if (proxy) {
+    yield* Effect.addFinalizer(() => Effect.promise(() => partition.closeAllConnections()))
+    // This is the browser's private partition, not the app/API connection. Never
+    // bypass localhost: it must resolve on the machine running the OC2 server.
+    yield* Effect.tryPromise(() =>
+      partition.setProxy({ mode: "fixed_servers", proxyRules: proxy.url, proxyBypassRules: "<-loopback>" }),
+    )
+    yield* Effect.tryPromise(() => partition.closeAllConnections())
+  }
 
   return {
     attach(contents: WebContents) {
+      if (!proxy) return () => {}
+
       const login = (
         event: Electron.Event,
         _details: Electron.AuthenticationResponseDetails,
@@ -92,7 +104,7 @@ export const createBrowserNetwork = Effect.fn("BrowserNetwork.create")(function*
 
         const timeout = setTimeout(fail, 5_000)
         request.on("login", (auth, callback) => {
-          if (auth.isProxy && auth.host === proxy.host && auth.port === proxy.port)
+          if (proxy && auth.isProxy && auth.host === proxy.host && auth.port === proxy.port)
             return callback(proxy.credentials.username, proxy.credentials.password)
           callback()
         })
