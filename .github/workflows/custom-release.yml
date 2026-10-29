@@ -1,0 +1,215 @@
+# OpenCode Custom: builds the Windows desktop app from an official release plus the commits of the `custom` branch,
+# and publishes it as a Release of this fork. The installed app takes its updates from the latest Release
+# (packages/desktop/electron-builder.config.ts).
+#
+# - At 8:00, 12:00 and 19:00 Paris time: if the official update feed announces a version this fork has not built yet,
+#   build it. Cron runs in UTC without daylight saving, so it fires at both possible UTC hours; GitHub can start a
+#   scheduled run more than an hour late, so the plan keeps a run that starts within 3 hours of a check time. A second
+#   run in the same window finds the version built (or its issue open) and does nothing.
+# - On a push to `custom` (or a manual run): build again, as a new release of the same official version.
+# - Versions: the CLI keeps the official version (2.0.33); the app is 2.0.33-custom.<n>, so that a rebuild counts as
+#   an update and the next official version counts as a newer one.
+# - The custom commits are replayed on the official tag in this run only; nothing is pushed. A conflict, or a failed
+#   check or build, publishes nothing and opens an issue (one per version: the scheduled runs skip a version that has
+#   an open issue until it is closed).
+
+name: custom-release
+
+on:
+  schedule:
+    - cron: "0 6,7,10,11,17,18 * * *"
+  push:
+    branches: [custom]
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Official version to build (default: the latest one announced by the official update feed)"
+        required: false
+
+permissions:
+  contents: write
+  issues: write
+
+concurrency:
+  group: custom-release
+  cancel-in-progress: false
+
+jobs:
+  plan:
+    if: github.repository == 'alexisgrau/opencode'
+    runs-on: ubuntu-latest
+    outputs:
+      build: ${{ steps.plan.outputs.build }}
+      version: ${{ steps.plan.outputs.version }}
+      app: ${{ steps.plan.outputs.app }}
+      tag: ${{ steps.plan.outputs.tag }}
+    steps:
+      - id: plan
+        env:
+          GH_TOKEN: ${{ github.token }}
+          EVENT: ${{ github.event_name }}
+          INPUT_VERSION: ${{ inputs.version }}
+        run: |
+          set -euo pipefail
+          version="${INPUT_VERSION:-}"
+          if [ -z "$version" ]; then
+            version=$(curl -fsSL https://opencode.ai/update/api/latest/desktop/opencode/latest.yml \
+              | sed -n 's/^version: *//p' | tr -d "\"' \r")
+          fi
+          if ! [[ "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "Unexpected official version: '$version'"
+            exit 1
+          fi
+
+          # Releases of this version already published: custom-v<version>-<n>.
+          last=$(gh release list -R "$GITHUB_REPOSITORY" --limit 100 --json tagName -q '.[].tagName' \
+            | sed -n "s/^custom-v${version//./\\.}-\([0-9]*\)$/\1/p" | sort -n | tail -1)
+          last=${last:-0}
+          failed=$(gh issue list -R "$GITHUB_REPOSITORY" --state open --search "custom-v$version in:title" \
+            --json number -q 'length')
+
+          hour=$(TZ=Europe/Paris date +%H)
+          build=false
+          if [ "$EVENT" != schedule ]; then build=true
+          elif [[ " 08 09 10 12 13 14 19 20 21 " != *" $hour "* ]]; then echo "Paris $hour:00 is not a check time"
+          elif [ "$last" = 0 ] && [ "$failed" = 0 ]; then build=true
+          fi
+
+          n=$((last + 1))
+          {
+            echo "build=$build"
+            echo "version=$version"
+            echo "app=$version-custom.$n"
+            echo "tag=custom-v$version-$n"
+          } >> "$GITHUB_OUTPUT"
+          echo "Official $version, last build $last, open issues $failed, build: $build"
+
+  build:
+    needs: plan
+    if: needs.plan.outputs.build == 'true'
+    runs-on: windows-latest
+    timeout-minutes: 150
+    defaults:
+      run:
+        shell: bash
+    env:
+      VERSION: ${{ needs.plan.outputs.version }}
+      APP_VERSION: ${{ needs.plan.outputs.app }}
+      TAG: ${{ needs.plan.outputs.tag }}
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - uses: actions/checkout@f43a0e5ff2bd294095638e18286ca9a3d1956744 # v3.6.0
+        with:
+          fetch-depth: 0
+
+      - name: Replay the custom commits on the official release
+        id: rebase
+        run: |
+          set -euo pipefail
+          echo "stage=récupération du code" >> "$GITHUB_OUTPUT"
+          git config user.name "opencode-custom-ci"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git remote add upstream https://github.com/anomalyco/opencode.git
+          git fetch --no-tags upstream "+refs/tags/v2.*:refs/tags/v2.*"
+          base=$(git describe --tags --match 'v2.*' --abbrev=0 HEAD)
+          echo "custom is based on $base; building on v$VERSION"
+          echo "base=$base" >> "$GITHUB_OUTPUT"
+          if [ "$base" != "v$VERSION" ]; then
+            # `custom` deletes the official workflows: a conflict on one of them (changed upstream, deleted here) is
+            # settled by keeping it deleted. Any other conflict stops the build.
+            if ! git rebase --onto "v$VERSION" "$base"; then
+              while true; do
+                conflicts=$(git diff --name-only --diff-filter=U)
+                others=$(printf '%s\n' "$conflicts" | grep -v -e '^\.github/workflows/' -e '^$' || true)
+                if [ -z "$conflicts" ] || [ -n "$others" ] \
+                  || printf '%s\n' "$conflicts" | grep -qx '.github/workflows/custom-release.yml'; then
+                  git rebase --abort
+                  echo "stage=conflit" >> "$GITHUB_OUTPUT"
+                  exit 1
+                fi
+                echo "Kept deleted: $conflicts"
+                printf '%s\n' "$conflicts" | xargs git rm -q
+                if GIT_EDITOR=true git rebase --continue; then break; fi
+              done
+            fi
+          fi
+          git log --oneline "v$VERSION..HEAD"
+          echo "stage=" >> "$GITHUB_OUTPUT"
+
+      - uses: ./.github/actions/setup-bun
+
+      - name: Check the custom packages
+        id: check
+        run: |
+          set -euo pipefail
+          echo "stage=vérifications" >> "$GITHUB_OUTPUT"
+          (cd packages/gui-plugins && bun run typecheck && bun test)
+          (cd packages/plugin-browser && bun run typecheck && bun test)
+          echo "stage=" >> "$GITHUB_OUTPUT"
+
+      - name: Build the CLI
+        id: cli
+        working-directory: packages/cli
+        env:
+          OPENCODE_VERSION: ${{ needs.plan.outputs.version }}
+          OPENCODE_CHANNEL: latest
+          OPENCODE_TARGET: windows-x64-baseline
+        run: |
+          set -euo pipefail
+          echo "stage=compilation du CLI" >> "$GITHUB_OUTPUT"
+          bun run build --skip-install
+          echo "stage=" >> "$GITHUB_OUTPUT"
+
+      # As the official release: the app is built and packed unpacked (app/), then the NSIS installer is packed around
+      # it. Nothing is signed. The installer step writes latest.yml and the blockmap in packages/desktop/dist.
+      - name: Build the desktop app
+        id: desktop
+        working-directory: packages/desktop
+        env:
+          OPENCODE_VERSION: ${{ needs.plan.outputs.app }}
+          OPENCODE_CHANNEL: prod
+          OPENCODE_TARGET: windows-x64
+          NODE_OPTIONS: --max-old-space-size=4096
+        run: |
+          set -euo pipefail
+          echo "stage=compilation de l'app" >> "$GITHUB_OUTPUT"
+          bun run build
+          bun run pack
+          rm -rf "$RUNNER_TEMP/app"
+          cp -r "$GITHUB_WORKSPACE/dist/desktop/app" "$RUNNER_TEMP/app"
+          OPENCODE_DESKTOP_APP="$RUNNER_TEMP/app" bun run pack
+          grep -q "^version: $APP_VERSION$" dist/latest.yml
+          cp dist/latest.yml dist/opencode-desktop-win-x64.exe.blockmap "$GITHUB_WORKSPACE/dist/desktop/"
+          echo "stage=" >> "$GITHUB_OUTPUT"
+
+      - name: Publish the release
+        run: |
+          set -euo pipefail
+          cd dist/desktop
+          {
+            echo "OpenCode $VERSION (officiel) + les modifications de la branche \`custom\` :"
+            echo
+            echo '```'
+            git log --format='%h %s' "v$VERSION..HEAD"
+            echo '```'
+          } > notes.md
+          gh release create "$TAG" -R "$GITHUB_REPOSITORY" --target "$GITHUB_SHA" --latest \
+            --title "OpenCode Custom $APP_VERSION" --notes-file notes.md \
+            opencode-desktop-win-x64.exe opencode-desktop-win-x64.exe.blockmap latest.yml
+
+      - name: Report the failure
+        if: failure()
+        env:
+          STAGE: ${{ steps.rebase.outputs.stage || steps.check.outputs.stage || steps.cli.outputs.stage || steps.desktop.outputs.stage || 'publication' }}
+          BASE: ${{ steps.rebase.outputs.base }}
+          RUN: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          gh issue create -R "$GITHUB_REPOSITORY" --title "$TAG : échec ($STAGE)" --body "$(cat <<EOF
+          La mise à jour vers OpenCode $VERSION a échoué à l'étape « $STAGE ». Rien n'a été publié : l'app installée reste sur sa version.
+
+          - Branche \`custom\` posée sur : $BASE
+          - Journal : $RUN
+
+          Pour un conflit : rejouer \`custom\` sur \`v$VERSION\` en local (\`git rebase --onto v$VERSION $BASE custom\`), régler les conflits, puis pousser \`custom\`, ce qui relance la compilation. Fermer cette issue rouvre les vérifications de 8 h, 12 h et 19 h pour cette version.
+          EOF
+          )"

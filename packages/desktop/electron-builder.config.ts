@@ -264,7 +264,8 @@ export function getConfig() {
         dmg: { icon: "resources/icons/icon.icns" },
         publish: {
           provider: "generic",
-          url: "https://opencode.ai/update/api/latest/desktop/opencode/",
+          // OpenCode Custom: updates come from the fork's latest Release (.github/workflows/custom-release.yml).
+          url: "https://github.com/alexisgrau/opencode/releases/latest/download/",
           channel: "latest",
         },
         deb: { fpm: [metainfoFpm(appId), legacyDesktopEntryFpm] },
