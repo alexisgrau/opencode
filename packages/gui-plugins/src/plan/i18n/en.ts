@@ -1,0 +1,15 @@
+export default {
+  "tab.title": "Plan",
+  "menu.open": "Plan",
+  "command.title": "Open the plan",
+  "command.description": "Show the project's plan.json in a side tab",
+  empty: "No plan in this project yet.",
+  invalid: "plan.json can't be read: {{error}}",
+  "no.steps": "(no steps)",
+  count: "{{done}}/{{total}} tasks done",
+  updated: "updated {{date}}",
+  "field.description": "Description",
+  "field.proof": "Proof",
+  "field.agents": "Agents",
+  "field.history": "History",
+}
